@@ -87,6 +87,11 @@ def _safe_manifest_write(manifest: ManifestDB, func_name: str, *args, **kwargs):
         if "disk" in err_msg or "full" in err_msg or "no space" in err_msg:
             _disk_full_paused = True
             logger.error("DISK FULL — manifest write failed: %s. Pausing sync cycle.", exc)
+            try:
+                from .status_tray import notify_disk_full
+                notify_disk_full()
+            except Exception:
+                pass
             return False
         raise  # Re-raise non-disk errors
 
@@ -554,7 +559,24 @@ def _run_sync_loop(cfg: SyncConfig, once: bool = False) -> None:
     """Run the main file sync loop."""
     if not os.path.isdir(cfg.nas_root):
         logger.error("NAS_ROOT does not exist: %s", cfg.nas_root)
+        # Notify user if tray is available
+        try:
+            from .status_tray import notify_nas_disconnected
+            notify_nas_disconnected(cfg.nas_root)
+        except Exception:
+            pass
         sys.exit(1)
+
+    # Start status tray (menu bar icon)
+    try:
+        from .status_tray import start_tray, sync_status, notify_error, notify_sync_complete, notify_nas_disconnected, notify_disk_full
+        sync_status.nas_root = cfg.nas_root
+        sync_status.yacht_id = cfg.yacht_id
+        if not once:  # Don't show tray for --once mode
+            start_tray()
+    except Exception as exc:
+        logger.info("Status tray not available: %s", exc)
+        sync_status = None
 
     manifest = ManifestDB(cfg.manifest_path)
     manifest.open()
@@ -590,7 +612,32 @@ def _run_sync_loop(cfg: SyncConfig, once: bool = False) -> None:
 
     try:
         while not _shutdown:
-            run_cycle(cfg, manifest)
+            # Update tray status
+            if sync_status:
+                sync_status.set_syncing()
+
+            # Check NAS is still accessible
+            if not os.path.isdir(cfg.nas_root):
+                logger.error("NAS disconnected: %s", cfg.nas_root)
+                if sync_status:
+                    notify_nas_disconnected(cfg.nas_root)
+                # Wait and retry
+                for _ in range(cfg.poll_interval_s):
+                    if _shutdown or os.path.isdir(cfg.nas_root):
+                        break
+                    time.sleep(1)
+                continue
+
+            stats = run_cycle(cfg, manifest)
+
+            # Update tray with results
+            if sync_status:
+                sync_status.update_cycle(stats)
+                new_files = stats.get("new", 0) + stats.get("modified", 0)
+                if new_files > 0:
+                    notify_sync_complete(new_files)
+                if stats.get("failed", 0) > 0:
+                    notify_error(f"{stats['failed']} file(s) failed to sync")
 
             if once:
                 break

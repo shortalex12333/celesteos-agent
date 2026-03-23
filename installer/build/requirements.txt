@@ -19,6 +19,9 @@ requests==2.31.0
 # Installer GUI (native window with embedded HTML)
 pywebview==6.1
 
+# macOS menu bar status icon
+rumps==0.4.0
+
 # No embedding libraries - done in cloud!
 # No numpy - not needed
 # No PIL - not needed
