@@ -3,20 +3,37 @@ from __future__ import annotations
 """
 Logging configuration for the filesync daemon.
 RotatingFileHandler: 10MB per file, 5 rotations.
-Writes to /Users/Shared/CelesteOS/logs/filesync.log + stdout for launchd capture.
+Writes to ~/.celesteos/logs/filesync.log + stdout for launchd capture.
 """
 
+import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-LOG_DIR = Path("/Users/Shared/CelesteOS/logs")
+LOG_DIR = Path.home() / ".celesteos" / "logs"
 LOG_FILE = LOG_DIR / "filesync.log"
 MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 BACKUP_COUNT = 5
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+
+
+class JSONFormatter(logging.Formatter):
+    """Structured JSON log formatter for log aggregation."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        log_entry = {
+            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[1]:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_entry, default=str)
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -31,7 +48,12 @@ def configure_logging(level: int = logging.INFO) -> None:
     for handler in root.handlers[:]:
         root.removeHandler(handler)
 
-    formatter = logging.Formatter(LOG_FORMAT)
+    use_json = os.environ.get("LOG_FORMAT_JSON", "") == "1"
+
+    if use_json:
+        formatter = JSONFormatter()
+    else:
+        formatter = logging.Formatter(LOG_FORMAT)
 
     # Stdout handler (for launchd capture and foreground mode)
     stdout_handler = logging.StreamHandler(sys.stdout)

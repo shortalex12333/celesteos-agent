@@ -43,6 +43,9 @@ def _find_nas_candidates() -> list[str]:
             # Skip macOS system volume
             if entry.name == "Macintosh HD":
                 continue
+            # Skip volumes we can't write to
+            if not os.access(str(entry), os.W_OK):
+                continue
             name = entry.name
             for pattern in NAS_PATTERNS:
                 if re.search(pattern, name):

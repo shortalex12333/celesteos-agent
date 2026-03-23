@@ -107,7 +107,7 @@ STATUS_HTML = """\
   /* Stats grid */
   .stats {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
     gap: 1px;
     background: var(--border);
     border-bottom: 1px solid var(--border);
@@ -304,6 +304,10 @@ STATUS_HTML = """\
       <div class="stat-value" id="stat-failed">0</div>
       <div class="stat-label">Failed</div>
     </div>
+    <div class="stat">
+      <div class="stat-value" id="stat-dlq">0</div>
+      <div class="stat-label">DLQ</div>
+    </div>
   </div>
 
   <!-- Meta -->
@@ -325,6 +329,7 @@ STATUS_HTML = """\
   <div class="actions">
     <button class="action-btn" onclick="doOpenNAS()">Open NAS</button>
     <button class="action-btn" onclick="doOpenLogs()">View Logs</button>
+    <button class="action-btn" id="btn-retry" onclick="doRetry()" style="display:none;">Retry All Failed</button>
     <button class="action-btn warn" id="btn-pause" onclick="doTogglePause()">Pause Sync</button>
   </div>
 
@@ -361,6 +366,15 @@ STATUS_HTML = """\
       const failedEl = document.getElementById('stat-failed');
       failedEl.textContent = s.files_failed;
       failedEl.className = 'stat-value' + (s.files_failed > 0 ? ' error' : '');
+
+      // DLQ count
+      const dlqEl = document.getElementById('stat-dlq');
+      dlqEl.textContent = s.files_dlq || 0;
+      dlqEl.className = 'stat-value' + ((s.files_dlq || 0) > 0 ? ' error' : '');
+
+      // Show retry button if there are failed or DLQ files
+      const retryBtn = document.getElementById('btn-retry');
+      retryBtn.style.display = (s.files_failed > 0 || (s.files_dlq || 0) > 0) ? '' : 'none';
 
       // Meta
       document.getElementById('meta-last-sync').textContent = s.last_sync;
@@ -489,11 +503,17 @@ class StatusAPI:
         return json.dumps({"paused": sync_status.is_paused})
 
     def retry_failed(self) -> str:
-        """Clear errors and trigger a retry on next cycle."""
+        """Reset failed/DLQ files to pending and clear errors."""
         from .status_tray import sync_status
+        reset_count = 0
+        if sync_status.retry_callback:
+            try:
+                reset_count = sync_status.retry_callback()
+            except Exception as exc:
+                logger.warning("Retry callback failed: %s", exc)
         sync_status.clear_errors()
-        logger.info("Retry requested — errors cleared, will retry on next cycle")
-        return json.dumps({"ok": True})
+        logger.info("Retry requested — %d files reset to pending, errors cleared", reset_count)
+        return json.dumps({"ok": True, "reset": reset_count})
 
 
 # ---------------------------------------------------------------------------

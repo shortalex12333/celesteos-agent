@@ -21,6 +21,7 @@ from .constants import (
     UPLOAD_TIMEOUT_NORMAL,
     get_mime_type,
 )
+from .retry import retry_with_backoff
 
 logger = logging.getLogger("agent.uploader")
 
@@ -48,18 +49,19 @@ def _iter_file_chunks(file_path: str, chunk_size: int = STREAM_CHUNK_SIZE) -> It
 
 
 def probe_connectivity(cfg: SyncConfig) -> bool:
-    """HEAD request to Supabase to check reachability. Returns True if OK."""
+    """HEAD request to Supabase to check reachability. Returns True if OK (2xx/3xx only)."""
     try:
         resp = requests.head(
             f"{cfg.supabase_url}/storage/v1/bucket",
             headers={"apikey": cfg.supabase_key, "Authorization": f"Bearer {cfg.supabase_key}"},
             timeout=SPEED_PROBE_TIMEOUT,
         )
-        return resp.status_code < 500
+        return resp.status_code < 400
     except requests.RequestException:
         return False
 
 
+@retry_with_backoff(max_retries=3, base_delay=1.0, max_delay=8.0)
 def verify_upload(cfg: SyncConfig, storage_path: str, expected_size: int) -> bool:
     """
     HEAD the uploaded object and verify content-length matches local file size.
@@ -146,6 +148,7 @@ def check_remote_exists(cfg: SyncConfig, storage_path: str) -> int | None:
         return None
 
 
+@retry_with_backoff(max_retries=3, base_delay=1.0, max_delay=8.0)
 def _do_upload(
     cfg: SyncConfig,
     local_path: str,
@@ -242,3 +245,40 @@ def upload_file(
 
     logger.debug("Uploaded %s (%.1f KB, streamed)", storage_path, file_size / 1024)
     return storage_path
+
+
+def cleanup_orphaned_temps(cfg: SyncConfig) -> int:
+    """
+    Remove orphaned .tmp files in the yacht's storage bucket from interrupted uploads.
+    Returns count of deleted temps.
+    """
+    try:
+        resp = requests.post(
+            f"{cfg.supabase_url}/storage/v1/object/list/{BUCKET}",
+            headers={
+                "apikey": cfg.supabase_key,
+                "Authorization": f"Bearer {cfg.supabase_key}",
+                "Content-Type": "application/json",
+            },
+            json={"prefix": f"{cfg.yacht_id}/", "search": ".tmp"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return 0
+
+        items = resp.json()
+        count = 0
+        for item in items:
+            name = item.get("name", "")
+            if name.endswith(".tmp"):
+                storage_path = f"{cfg.yacht_id}/{name}"
+                if delete_object(cfg, storage_path):
+                    count += 1
+                    logger.info("Cleaned orphaned temp: %s", storage_path)
+
+        if count:
+            logger.info("Cleaned %d orphaned .tmp files from storage", count)
+        return count
+    except requests.RequestException as exc:
+        logger.warning("Orphaned temp cleanup request failed: %s", exc)
+        return 0

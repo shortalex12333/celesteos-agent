@@ -8,18 +8,25 @@ Continuously transfers files from a mounted NAS → Supabase Storage → search_
 NO text extraction or chunking — that happens in the Docker extraction worker.
 Runs as a macOS launchd daemon on the yacht's Apple Studio.
 
+This daemon is HEADLESS — no GUI, no Dock icon, no menu bar.
+Status is written to ~/.celesteos/status.json for external consumers.
+
 Usage:
     python -m agent              # foreground
     python -m agent --once       # single cycle then exit
 """
 
 import argparse
+import fcntl
+import json
 import logging
 import os
 import signal
 import sqlite3
 import sys
+import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -35,7 +42,51 @@ from .heartbeat import report_error, send_heartbeat
 from .indexer import soft_delete, upsert_doc_metadata, upsert_search_index
 from .manifest_db import ManifestDB
 from .scanner import ScanItem, scan_nas
-from .uploader import check_remote_exists, probe_connectivity, upload_file
+from .uploader import check_remote_exists, cleanup_orphaned_temps, probe_connectivity, upload_file
+
+# ---------------------------------------------------------------------------
+# PID file lock — prevent double-launch
+# ---------------------------------------------------------------------------
+_pid_lock_fd = None
+STATUS_FILE = Path.home() / ".celesteos" / "status.json"
+
+
+def _acquire_pid_lock() -> None:
+    """Acquire an exclusive lock on ~/.celesteos/agent.pid to prevent double-launch."""
+    global _pid_lock_fd
+    pid_dir = Path.home() / ".celesteos"
+    pid_dir.mkdir(parents=True, exist_ok=True)
+    pid_file = pid_dir / "agent.pid"
+
+    _pid_lock_fd = open(pid_file, "w")
+    try:
+        fcntl.flock(_pid_lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _pid_lock_fd.write(str(os.getpid()))
+        _pid_lock_fd.flush()
+    except OSError:
+        logging.getLogger("agent.daemon").error(
+            "Another instance is already running (pid lock: %s)", pid_file
+        )
+        sys.exit(0)
+
+
+def _write_status(status: dict) -> None:
+    """Write daemon status to ~/.celesteos/status.json for external consumers."""
+    try:
+        STATUS_FILE.write_text(json.dumps(status, default=str))
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Watcher trigger event — lets watcher callbacks wake the sync loop early
+# ---------------------------------------------------------------------------
+_watcher_trigger = threading.Event()
+
+# ---------------------------------------------------------------------------
+# Config reload flag for SIGHUP
+# ---------------------------------------------------------------------------
+_reload_config = False
 
 # ---------------------------------------------------------------------------
 # Logging — configure_logging() is called in main() for production;
@@ -63,6 +114,15 @@ signal.signal(signal.SIGINT, _signal_handler)
 signal.signal(signal.SIGTERM, _signal_handler)
 
 
+def _sighup_handler(signum, frame):
+    global _reload_config
+    logger.info("Received SIGHUP, will reload config at next cycle start")
+    _reload_config = True
+
+
+signal.signal(signal.SIGHUP, _sighup_handler)
+
+
 # ---------------------------------------------------------------------------
 # Disk-full detection
 # ---------------------------------------------------------------------------
@@ -87,11 +147,6 @@ def _safe_manifest_write(manifest: ManifestDB, func_name: str, *args, **kwargs):
         if "disk" in err_msg or "full" in err_msg or "no space" in err_msg:
             _disk_full_paused = True
             logger.error("DISK FULL — manifest write failed: %s. Pausing sync cycle.", exc)
-            try:
-                from .status_tray import notify_disk_full
-                notify_disk_full()
-            except Exception:
-                pass
             return False
         raise  # Re-raise non-disk errors
 
@@ -215,7 +270,7 @@ def _process_file(cfg: SyncConfig, manifest: ManifestDB, item: ScanItem) -> bool
 
         # 5. doc_metadata upsert
         content_type = get_mime_type(filename)
-        upsert_doc_metadata(
+        obj_id = upsert_doc_metadata(
             cfg=cfg,
             yacht_id=cfg.yacht_id,
             relative_path=rel,
@@ -228,16 +283,26 @@ def _process_file(cfg: SyncConfig, manifest: ManifestDB, item: ScanItem) -> bool
         )
 
         # 6. search_index upsert (NO extraction — Docker handles that)
-        upsert_search_index(
-            cfg=cfg,
-            yacht_id=cfg.yacht_id,
-            relative_path=rel,
-            filename=filename,
-            doc_type=doc_type,
-            system_tag=system_tag,
-            storage_path=storage_path,
-            embedding_status=embedding_status,
-        )
+        # If this fails after doc_metadata succeeded, roll back doc_metadata
+        try:
+            upsert_search_index(
+                cfg=cfg,
+                yacht_id=cfg.yacht_id,
+                relative_path=rel,
+                filename=filename,
+                doc_type=doc_type,
+                system_tag=system_tag,
+                storage_path=storage_path,
+                embedding_status=embedding_status,
+            )
+        except Exception as idx_exc:
+            logger.error("search_index upsert failed for %s, rolling back doc_metadata: %s", rel, idx_exc)
+            try:
+                from .indexer import delete_doc_metadata
+                delete_doc_metadata(cfg, obj_id)
+            except Exception as rb_exc:
+                logger.warning("doc_metadata rollback also failed for %s: %s", rel, rb_exc)
+            raise
 
         # 7. Mark completed in manifest
         if not _safe_manifest_write(
@@ -252,14 +317,6 @@ def _process_file(cfg: SyncConfig, manifest: ManifestDB, item: ScanItem) -> bool
         manifest.update_mtime(rel, item.mtime_ns)
 
         logger.info("Synced: %s → %s [%s/%s]", rel, storage_path, doc_type, system_tag)
-
-        # Record activity for status window
-        try:
-            from .status_tray import sync_status as _ss
-            _ss.add_activity(rel, "synced")
-        except Exception:
-            pass
-
         return True
 
     except Exception as exc:
@@ -267,14 +324,6 @@ def _process_file(cfg: SyncConfig, manifest: ManifestDB, item: ScanItem) -> bool
         _safe_manifest_write(manifest, "mark_failed", rel)
         _safe_manifest_write(manifest, "log_error", rel, type(exc).__name__, str(exc))
         report_error(cfg, type(exc).__name__, str(exc), file_path=rel)
-
-        # Record failure for status window
-        try:
-            from .status_tray import sync_status as _ss
-            _ss.add_activity(rel, "failed")
-        except Exception:
-            pass
-
         return False
 
 
@@ -394,7 +443,7 @@ def run_cycle(cfg: SyncConfig, manifest: ManifestDB) -> dict:
 def _run_installation_flow(cfg: SyncConfig) -> bool:
     """
     Handle first-launch: register yacht, verify 2FA, store credentials.
-    Tries GUI first (pywebview), falls back to CLI prompts.
+    Tries GUI first (pywebview in subprocess), falls back to CLI prompts.
     Returns True if activation succeeded.
     """
     try:
@@ -402,20 +451,32 @@ def _run_installation_flow(cfg: SyncConfig) -> bool:
 
         install_config = InstallConfig.load_embedded()
 
-        # Try the full GUI installer (handles registration + 2FA + folder select)
+        # Try the full GUI installer in a subprocess.
+        # pywebview's NSApplication event loop can't coexist with the daemon's
+        # main thread, so we run it in a child process that exits cleanly.
         try:
-            from .installer_ui import run_installer_ui
-            logger.info("Launching installer GUI...")
-            selected_folder = run_installer_ui(install_config)
-            if selected_folder:
-                logger.info("GUI installer completed, NAS root: %s", selected_folder)
-                cfg.nas_root = selected_folder
-                return True
-            else:
-                logger.warning("GUI installer was cancelled or failed")
-                # Fall through to CLI mode
-        except ImportError:
-            logger.info("pywebview not available, using CLI mode")
+            import subprocess as _sp
+            logger.info("Launching installer GUI (subprocess)...")
+            result = _sp.run(
+                [sys.executable, "-m", "agent.installer_ui"],
+                timeout=600,  # 10 min max for user to complete
+            )
+            # Check if installer wrote the config files
+            env_file = Path.home() / ".celesteos" / ".env.local"
+            if env_file.exists():
+                from .config import _read_env_file
+                env = _read_env_file(env_file)
+                nas_root = env.get("NAS_ROOT", "")
+                if nas_root and os.path.isdir(nas_root):
+                    logger.info("GUI installer completed, NAS root: %s", nas_root)
+                    cfg.nas_root = nas_root
+                    return True
+            logger.warning("GUI installer finished but config incomplete")
+            # Fall through to CLI mode
+        except FileNotFoundError:
+            logger.info("python not found for subprocess, using CLI mode")
+        except _sp.TimeoutExpired:
+            logger.warning("Installer timed out after 10 minutes")
         except Exception as exc:
             logger.warning("GUI installer failed: %s, falling back to CLI", exc)
 
@@ -548,6 +609,7 @@ def _ensure_nas_root(cfg: SyncConfig) -> SyncConfig:
                 lines.append(line)
     lines.append(f"NAS_ROOT={nas_root}")
     env_file.write_text("\n".join(lines) + "\n")
+    os.chmod(str(env_file), 0o600)
 
     logger.info("NAS root saved: %s", nas_root)
     cfg.nas_root = nas_root
@@ -569,36 +631,24 @@ def _install_launchd_if_needed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sync loop
+# Sync loop (headless — no GUI)
 # ---------------------------------------------------------------------------
 def _run_sync_loop(cfg: SyncConfig, once: bool = False) -> None:
-    """Run the main file sync loop."""
+    """Run the main file sync loop. Pure background, no GUI."""
     if not os.path.isdir(cfg.nas_root):
         logger.error("NAS_ROOT does not exist: %s", cfg.nas_root)
-        # Notify user if tray is available
-        try:
-            from .status_tray import notify_nas_disconnected
-            notify_nas_disconnected(cfg.nas_root)
-        except Exception:
-            pass
         sys.exit(1)
-
-    # Start status tray (menu bar icon)
-    try:
-        from .status_tray import start_tray, sync_status, notify_error, notify_sync_complete, notify_nas_disconnected, notify_disk_full
-        sync_status.nas_root = cfg.nas_root
-        sync_status.yacht_id = cfg.yacht_id
-        if not once:  # Don't show tray for --once mode
-            start_tray()
-    except Exception as exc:
-        logger.info("Status tray not available: %s", exc)
-        sync_status = None
 
     manifest = ManifestDB(cfg.manifest_path)
     manifest.open()
 
     if probe_connectivity(cfg):
         _recover_interrupted(cfg, manifest)
+        # Cleanup orphaned .tmp files from interrupted large uploads
+        try:
+            cleanup_orphaned_temps(cfg)
+        except Exception as exc:
+            logger.warning("Orphaned temp cleanup failed: %s", exc)
     else:
         recovered = manifest.reset_interrupted()
         if recovered:
@@ -608,11 +658,16 @@ def _run_sync_loop(cfg: SyncConfig, once: bool = False) -> None:
     watcher = None
     try:
         from .watcher import FileWatcher
+
+        def _watcher_callback(p):
+            logger.debug("Watcher: change detected %s", p)
+            _watcher_trigger.set()
+
         watcher = FileWatcher(
             watch_paths=[cfg.nas_root],
-            on_file_created=lambda p: logger.debug("Watcher: created %s", p),
-            on_file_modified=lambda p: logger.debug("Watcher: modified %s", p),
-            on_file_deleted=lambda p: logger.debug("Watcher: deleted %s", p),
+            on_file_created=_watcher_callback,
+            on_file_modified=_watcher_callback,
+            on_file_deleted=_watcher_callback,
         )
         watcher.start()
         logger.info("File watcher started for %s", cfg.nas_root)
@@ -626,54 +681,73 @@ def _run_sync_loop(cfg: SyncConfig, once: bool = False) -> None:
     logger.info("File sync agent started — NAS: %s, yacht: %s, poll: %ds, source: %s",
                 cfg.nas_root, cfg.yacht_id, cfg.poll_interval_s, cfg.source_type)
 
+    # Write initial status
+    _write_status({
+        "state": "idle", "yacht_id": cfg.yacht_id, "nas_root": cfg.nas_root,
+        "files_synced": 0, "files_pending": 0, "files_failed": 0, "files_dlq": 0,
+        "last_sync": None, "pid": os.getpid(),
+    })
+
+    total_synced = 0
     try:
         while not _shutdown:
-            # Check pause state
-            if sync_status and sync_status.is_paused:
-                for _ in range(cfg.poll_interval_s):
-                    if _shutdown or not sync_status.is_paused:
-                        break
-                    time.sleep(1)
-                continue
-
-            # Update tray status
-            if sync_status:
-                sync_status.set_syncing()
+            # SIGHUP config reload
+            global _reload_config
+            if _reload_config:
+                _reload_config = False
+                try:
+                    cfg = load_config()
+                    logger.info("Config reloaded via SIGHUP")
+                except Exception as exc:
+                    logger.error("Config reload failed: %s", exc)
 
             # Check NAS is still accessible
             if not os.path.isdir(cfg.nas_root):
                 logger.error("NAS disconnected: %s", cfg.nas_root)
-                if sync_status:
-                    notify_nas_disconnected(cfg.nas_root)
-                # Wait and retry
+                _write_status({"state": "error", "error": f"NAS disconnected: {cfg.nas_root}"})
                 for _ in range(cfg.poll_interval_s):
                     if _shutdown or os.path.isdir(cfg.nas_root):
                         break
                     time.sleep(1)
                 continue
 
+            _write_status({"state": "syncing", "yacht_id": cfg.yacht_id, "pid": os.getpid()})
+
             stats = run_cycle(cfg, manifest)
 
-            # Update tray with results
-            if sync_status:
-                sync_status.update_cycle(stats)
-                new_files = stats.get("new", 0) + stats.get("modified", 0)
-                if new_files > 0:
-                    notify_sync_complete(new_files)
-                if stats.get("failed", 0) > 0:
-                    notify_error(f"{stats['failed']} file(s) failed to sync")
+            # Update status file
+            status_counts = manifest.count_by_status()
+            total_synced += stats.get("new", 0) + stats.get("modified", 0)
+            _write_status({
+                "state": "error" if stats.get("failed", 0) > 0 else "idle",
+                "yacht_id": cfg.yacht_id,
+                "nas_root": cfg.nas_root,
+                "files_synced": total_synced,
+                "files_pending": status_counts.get("pending", 0),
+                "files_failed": status_counts.get("failed", 0),
+                "files_dlq": status_counts.get("dlq", 0),
+                "last_sync": datetime.now().isoformat(),
+                "last_cycle": stats,
+                "pid": os.getpid(),
+            })
 
             if once:
                 break
 
+            # Sleep with watcher trigger — file changes wake the loop early
+            _watcher_trigger.clear()
             for _ in range(cfg.poll_interval_s):
                 if _shutdown:
                     break
-                time.sleep(1)
+                if _watcher_trigger.wait(timeout=1):
+                    _watcher_trigger.clear()
+                    logger.debug("Watcher triggered early sync cycle")
+                    break
     finally:
         if watcher:
             watcher.stop()
         manifest.close()
+        _write_status({"state": "stopped", "pid": os.getpid()})
         logger.info("File sync agent stopped")
 
 
@@ -687,6 +761,9 @@ def main():
 
     from .log_config import configure_logging
     configure_logging()
+
+    # 0. Prevent double-launch
+    _acquire_pid_lock()
 
     # 1. Check for existing credentials (Keychain)
     cfg = load_config()
@@ -710,7 +787,7 @@ def main():
     # 3. Install launchd auto-start (first successful run only)
     _install_launchd_if_needed()
 
-    # 4. Run sync loop
+    # 4. Run sync loop (headless)
     _run_sync_loop(cfg, once=args.once)
 
 

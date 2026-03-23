@@ -188,6 +188,7 @@ INSTALLER_HTML = """\
       <input type="text" id="code-input" class="code-input" maxlength="6"
              placeholder="000000" inputmode="numeric" pattern="[0-9]*"
              autocomplete="one-time-code">
+      <div id="code-timer" style="text-align:center;font-size:12px;color:var(--txt3);margin-top:8px;"></div>
       <button class="btn" id="btn-verify" onclick="doVerify()">Verify</button>
       <div class="msg" id="msg-verify"></div>
     </div>
@@ -267,6 +268,7 @@ INSTALLER_HTML = """\
       if (data.success) {
         document.getElementById('email-display').textContent = data.email_sent_to || 'your email';
         showStep('step-2fa');
+        startCodeTimer();
         document.getElementById('code-input').focus();
       } else {
         setMsg('msg-register', data.error || 'Registration failed', true);
@@ -276,6 +278,27 @@ INSTALLER_HTML = """\
     } finally {
       setLoading('btn-register', false);
     }
+  }
+
+  // 2FA countdown timer
+  let _timerInterval = null;
+  function startCodeTimer() {
+    let remaining = 600; // 10 minutes
+    const timerEl = document.getElementById('code-timer');
+    function update() {
+      if (remaining <= 0) {
+        timerEl.innerHTML = '<span style="color:var(--red);font-weight:600;">Code expired — restart setup</span>';
+        clearInterval(_timerInterval);
+        document.getElementById('btn-verify').disabled = true;
+        return;
+      }
+      const m = Math.floor(remaining / 60);
+      const s = remaining % 60;
+      timerEl.textContent = 'Code expires in ' + m + ':' + (s < 10 ? '0' : '') + s;
+      remaining--;
+    }
+    update();
+    _timerInterval = setInterval(update, 1000);
   }
 
   // Step 2: Verify 2FA
@@ -529,6 +552,9 @@ body {{ margin:0; padding:24px; background:#1a1a2e; color:#e2e8f0;
         if not os.path.isdir(path):
             return json.dumps({"success": False, "error": "Folder does not exist"})
 
+        if not os.access(path, os.W_OK):
+            return json.dumps({"success": False, "error": "Folder is not writable. Check permissions."})
+
         self._selected_folder = path
 
         # Save to ~/.celesteos/.env.local
@@ -543,20 +569,18 @@ body {{ margin:0; padding:24px; background:#1a1a2e; color:#e2e8f0;
                     lines.append(line)
         lines.append(f"NAS_ROOT={path}")
         env_file.write_text("\n".join(lines) + "\n")
+        os.chmod(str(env_file), 0o600)
 
-        # Install launchd
-        try:
-            from .launchd import install_launchd
-            install_launchd()
-        except Exception as exc:
-            logger.warning("Launchd install failed: %s", exc)
+        # NOTE: launchd is installed by the daemon on first successful run,
+        # not here. The installer subprocess exits cleanly after writing config.
 
         return json.dumps({"success": True})
 
     def finish(self) -> str:
-        """Close the window."""
+        """Close the window after the callback returns (avoids macOS deadlock)."""
         if self._window:
-            self._window.destroy()
+            w = self._window
+            threading.Timer(0.3, lambda: w.destroy()).start()
         return json.dumps({"success": True})
 
 
@@ -574,6 +598,14 @@ def run_installer_ui(config) -> Optional[str]:
     Returns:
         Selected NAS folder path, or None if cancelled
     """
+    # Prevent Python/pywebview from showing a Dock icon on macOS
+    try:
+        import AppKit
+        info = AppKit.NSBundle.mainBundle().infoDictionary()
+        info["LSBackgroundOnly"] = "1"
+    except ImportError:
+        pass
+
     import webview
 
     api = InstallerAPI(config)

@@ -304,6 +304,17 @@ class InstallationOrchestrator:
                     self.state = InstallState.ERROR
                     return False, "Failed to store credentials in Keychain"
 
+                # Write recovery key in case Keychain is reset
+                try:
+                    recovery_dir = Path.home() / ".celesteos"
+                    recovery_dir.mkdir(parents=True, exist_ok=True)
+                    recovery_path = recovery_dir / ".recovery_key"
+                    recovery_path.write_text(shared_secret)
+                    os.chmod(str(recovery_path), 0o600)
+                    logger.info("Recovery key written to %s", recovery_path)
+                except OSError as exc:
+                    logger.warning("Failed to write recovery key: %s", exc)
+
                 self._crypto = CryptoIdentity(self.config.yacht_id, shared_secret)
 
                 # Save tenant credentials to ~/.celesteos/.env.local
@@ -345,6 +356,7 @@ class InstallationOrchestrator:
         lines.append(f"SUPABASE_URL={supabase_url}")
         lines.append(f"SUPABASE_SERVICE_KEY={supabase_key}")
         env_file.write_text("\n".join(lines) + "\n")
+        os.chmod(str(env_file), 0o600)
         logger.info("Tenant credentials saved to %s", env_file)
 
     def _verify_credentials(self) -> bool:

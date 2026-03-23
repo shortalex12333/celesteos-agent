@@ -56,7 +56,10 @@ def _should_skip_file(name: str, size: int) -> bool:
     return False
 
 
-def scan_nas(nas_root: str, manifest: ManifestDB) -> list[ScanItem]:
+MAX_SCAN_DEPTH = int(os.environ.get("MAX_SCAN_DEPTH", "50"))
+
+
+def scan_nas(nas_root: str, manifest: ManifestDB, max_depth: int = MAX_SCAN_DEPTH) -> list[ScanItem]:
     """
     Walk NAS_ROOT, compare against manifest, return list of work items.
 
@@ -67,10 +70,17 @@ def scan_nas(nas_root: str, manifest: ManifestDB) -> list[ScanItem]:
         logger.error("NAS_ROOT does not exist or is not a directory: %s", nas_root)
         return []
 
+    root_depth = nas_root.rstrip(os.sep).count(os.sep)
     items: list[ScanItem] = []
     disk_paths: set[str] = set()
 
     for dirpath, dirnames, filenames in os.walk(nas_root, followlinks=False):
+        # Enforce max depth
+        current_depth = dirpath.count(os.sep) - root_depth
+        if current_depth >= max_depth:
+            dirnames[:] = []
+            continue
+
         # Prune hidden/system directories in-place
         dirnames[:] = [d for d in dirnames if not _should_skip_entry(d)]
 

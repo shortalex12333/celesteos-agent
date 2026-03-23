@@ -6,6 +6,7 @@ WAL mode for crash safety. Single-writer, no concurrency issues.
 """
 
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -53,6 +54,25 @@ class ManifestDB:
         self._conn: Optional[sqlite3.Connection] = None
 
     def open(self) -> None:
+        # Integrity check: if DB is corrupt, rename and recreate
+        if os.path.exists(self._db_path):
+            try:
+                test_conn = sqlite3.connect(self._db_path, timeout=5)
+                result = test_conn.execute("PRAGMA integrity_check").fetchone()
+                test_conn.close()
+                if result[0] != "ok":
+                    raise sqlite3.DatabaseError(f"integrity_check: {result[0]}")
+            except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc:
+                corrupt_path = self._db_path + ".corrupt"
+                logger.error(
+                    "Manifest DB corrupt (%s), renaming to %s and recreating",
+                    exc, corrupt_path,
+                )
+                try:
+                    os.rename(self._db_path, corrupt_path)
+                except OSError:
+                    os.remove(self._db_path)
+
         self._conn = sqlite3.connect(self._db_path, timeout=10)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -86,6 +106,19 @@ class ManifestDB:
                 "WHERE sync_status='uploading'"
             )
             return cur.rowcount
+
+    def reset_failed_to_pending(self) -> int:
+        """Reset all failed/dlq rows to pending with retry_count=0. Returns count."""
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE file_manifest SET sync_status='pending', retry_count=0, "
+                "next_retry_at=NULL, updated_at=datetime('now') "
+                "WHERE sync_status IN ('failed', 'dlq')"
+            )
+            count = cur.rowcount
+            if count:
+                logger.info("Reset %d failed/DLQ files to pending", count)
+            return count
 
     # ------------------------------------------------------------------
     # Lookups

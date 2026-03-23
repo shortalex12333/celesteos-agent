@@ -58,7 +58,7 @@ def _read_env_file(path: Path) -> dict[str, str]:
 
 
 def _get_keychain_password(service: str, account: str) -> str:
-    """Retrieve a password from macOS Keychain. Returns empty string on failure."""
+    """Retrieve a password from macOS Keychain with recovery key fallback. Returns empty string on failure."""
     try:
         result = subprocess.run(
             [
@@ -72,10 +72,26 @@ def _get_keychain_password(service: str, account: str) -> str:
             timeout=5,
         )
         if result.returncode == 0:
-            return result.stdout.strip()
+            pw = result.stdout.strip()
+            if pw:
+                return pw
         logger.debug("Keychain lookup failed for %s/%s: rc=%d", service, account, result.returncode)
     except Exception as exc:
         logger.warning("Keychain retrieval error: %s", exc)
+
+    # Fallback: recovery key file — ONLY for the HMAC shared_secret,
+    # not for Supabase keys or other credentials
+    if service == "com.celeste7.celesteos":
+        recovery_path = Path.home() / ".celesteos" / ".recovery_key"
+        if recovery_path.exists():
+            try:
+                secret = recovery_path.read_text().strip()
+                if secret:
+                    logger.warning("Using recovery key — Keychain may need repair (%s/%s)", service, account)
+                    return secret
+            except OSError as exc:
+                logger.warning("Failed to read recovery key: %s", exc)
+
     return ""
 
 

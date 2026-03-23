@@ -13,6 +13,7 @@ from pathlib import Path
 import requests
 
 from .config import SyncConfig
+from .retry import retry_with_backoff
 
 logger = logging.getLogger("agent.heartbeat")
 
@@ -22,6 +23,22 @@ MAX_CONSECUTIVE_FAILURES = 3
 
 # Module-level counter for consecutive heartbeat failures
 _consecutive_failures = 0
+
+
+@retry_with_backoff(max_retries=3, base_delay=1.0, max_delay=8.0)
+def _post_heartbeat(cfg: SyncConfig, row: dict) -> requests.Response:
+    """POST heartbeat with retry. Raises on network failure."""
+    return requests.post(
+        f"{cfg.supabase_url}/rest/v1/yacht_heartbeats",
+        headers={
+            "apikey": cfg.supabase_key,
+            "Authorization": f"Bearer {cfg.supabase_key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates",
+        },
+        json=row,
+        timeout=10,
+    )
 
 
 def send_heartbeat(
@@ -49,17 +66,7 @@ def send_heartbeat(
     }
 
     try:
-        resp = requests.post(
-            f"{cfg.supabase_url}/rest/v1/yacht_heartbeats",
-            headers={
-                "apikey": cfg.supabase_key,
-                "Authorization": f"Bearer {cfg.supabase_key}",
-                "Content-Type": "application/json",
-                "Prefer": "resolution=merge-duplicates",
-            },
-            json=row,
-            timeout=10,
-        )
+        resp = _post_heartbeat(cfg, row)
         if resp.status_code in (200, 201):
             if _consecutive_failures > 0:
                 logger.info("Heartbeat recovered after %d consecutive failures", _consecutive_failures)

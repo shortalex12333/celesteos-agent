@@ -24,6 +24,7 @@ import hmac
 import secrets
 import time
 import json
+import uuid
 from typing import Optional, Tuple, Dict, Any
 
 
@@ -72,9 +73,10 @@ class CryptoIdentity:
             raise ValueError("Cannot sign request: shared_secret not available")
 
         ts = timestamp or int(time.time())
+        request_id = str(uuid.uuid4())
 
-        # Canonical payload: sorted JSON with timestamp prepended
-        canonical = f"{ts}:{json.dumps(payload, sort_keys=True, separators=(',', ':'))}"
+        # Canonical payload: sorted JSON with timestamp and nonce prepended
+        canonical = f"{ts}:{request_id}:{json.dumps(payload, sort_keys=True, separators=(',', ':'))}"
 
         # HMAC-SHA256
         signature = hmac.new(
@@ -86,6 +88,7 @@ class CryptoIdentity:
         return {
             'X-Yacht-ID': self.yacht_id,
             'X-Timestamp': str(ts),
+            'X-Request-ID': request_id,
             'X-Signature': signature
         }
 

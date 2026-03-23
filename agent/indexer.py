@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 import requests
 
 from .config import SyncConfig
+from .retry import retry_with_backoff
 
 logger = logging.getLogger("agent.indexer")
 
@@ -130,6 +131,7 @@ def _find_equipment_id(cfg: SyncConfig, yacht_id: str, filename: str, system_tag
     return None
 
 
+@retry_with_backoff(max_retries=3, base_delay=1.0, max_delay=8.0)
 def upsert_doc_metadata(
     cfg: SyncConfig,
     yacht_id: str,
@@ -176,6 +178,7 @@ def upsert_doc_metadata(
     return obj_id
 
 
+@retry_with_backoff(max_retries=3, base_delay=1.0, max_delay=8.0)
 def upsert_search_index(
     cfg: SyncConfig,
     yacht_id: str,
@@ -242,6 +245,25 @@ def upsert_search_index(
         raise RuntimeError(f"search_index upsert failed: {resp.status_code}")
 
     return obj_id
+
+
+def delete_doc_metadata(cfg: SyncConfig, object_id: str) -> bool:
+    """Delete a doc_metadata row by object_id. Used for rollback when search_index upsert fails."""
+    try:
+        resp = requests.delete(
+            f"{cfg.supabase_url}/rest/v1/doc_metadata",
+            params={"id": f"eq.{object_id}"},
+            headers=_patch_headers(cfg),
+            timeout=15,
+        )
+        if resp.status_code in (200, 204):
+            logger.info("Rolled back doc_metadata for %s", object_id)
+            return True
+        logger.warning("doc_metadata delete returned %d for %s", resp.status_code, object_id)
+        return False
+    except requests.RequestException as exc:
+        logger.warning("doc_metadata delete failed for %s: %s", object_id, exc)
+        return False
 
 
 def soft_delete(cfg: SyncConfig, yacht_id: str, relative_path: str) -> None:

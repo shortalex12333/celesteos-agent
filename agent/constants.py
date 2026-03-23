@@ -18,7 +18,8 @@ HASH_CHUNK_SIZE = 65_536                        # 64 KB SHA-256 streaming chunks
 DEFAULT_POLL_INTERVAL_S = 300                   # 5 minutes
 UPLOAD_TIMEOUT_NORMAL = 120                     # seconds
 UPLOAD_TIMEOUT_LARGE = 300                      # seconds
-SPEED_PROBE_TIMEOUT = 10                        # seconds
+import os
+SPEED_PROBE_TIMEOUT = int(os.environ.get("SPEED_PROBE_TIMEOUT", "10"))  # seconds
 BACKOFF_BASE_S = 60                             # retry delay multiplier
 BACKOFF_MAX_S = 3600                            # max retry delay
 MAX_RETRY_COUNT = 10                            # after this → dlq
@@ -36,6 +37,7 @@ INDEXABLE_EXTENSIONS = frozenset({
     ".xml", ".html", ".htm", ".pptx", ".rtf", ".odt", ".ods",
     ".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".gif",
     ".webp", ".heic",
+    ".pages", ".numbers", ".keynote", ".eml",
 })
 
 STORAGE_ONLY_EXTENSIONS = frozenset({
@@ -44,6 +46,7 @@ STORAGE_ONLY_EXTENSIONS = frozenset({
     ".zip", ".tar", ".gz", ".7z", ".rar", ".dmg", ".iso",
     ".psd", ".ai", ".indd", ".dwg", ".dxf",
     ".exe", ".msi", ".pkg", ".app",
+    ".msg",
 })
 
 # ---------------------------------------------------------------------------
@@ -93,6 +96,11 @@ MIME_MAP = {
     "gz": "application/gzip",
     "7z": "application/x-7z-compressed",
     "dmg": "application/x-apple-diskimage",
+    "pages": "application/x-iwork-pages-sffpages",
+    "numbers": "application/x-iwork-numbers-sffnumbers",
+    "keynote": "application/x-iwork-keynote-sffkey",
+    "eml": "message/rfc822",
+    "msg": "application/vnd.ms-outlook",
 }
 
 

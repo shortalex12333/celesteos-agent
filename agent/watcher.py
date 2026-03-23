@@ -7,6 +7,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from pathlib import Path
 from typing import Callable, Set, Optional
+import threading
 import time
 
 
@@ -58,9 +59,10 @@ class DocumentWatcher(FileSystemEventHandler):
         self.on_file_deleted = on_file_deleted
         self.debounce_seconds = debounce_seconds
 
-        # Track recent events for debouncing
+        # Track recent events for debouncing (guarded by _lock)
         self._recent_events: Set[tuple] = set()
         self._last_cleanup = time.time()
+        self._lock = threading.Lock()
 
     def on_created(self, event: FileSystemEvent):
         """Handle file creation event."""
@@ -117,16 +119,17 @@ class DocumentWatcher(FileSystemEventHandler):
         event_key = (str(file_path), event_type)
         current_time = time.time()
 
-        # Cleanup old events periodically
-        if current_time - self._last_cleanup > 60:
-            self._cleanup_recent_events()
+        with self._lock:
+            # Cleanup old events periodically
+            if current_time - self._last_cleanup > 60:
+                self._cleanup_recent_events()
 
-        # Check if this event was recent
-        if event_key in self._recent_events:
-            return False
+            # Check if this event was recent
+            if event_key in self._recent_events:
+                return False
 
-        # Record this event
-        self._recent_events.add((event_key, current_time))
+            # Record this event
+            self._recent_events.add((event_key, current_time))
 
         return True
 

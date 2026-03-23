@@ -18,12 +18,15 @@ PLIST_PATH = PLIST_DIR / f"{LABEL}.plist"
 LOG_DIR = Path.home() / ".celesteos" / "logs"
 
 
+def _is_production() -> bool:
+    """Check if running from a bundled .app (vs dev source)."""
+    return Path("/Applications/CelesteOS.app/Contents/MacOS/CelesteOS").exists()
+
+
 def _get_agent_executable() -> str:
     """Find the CelesteOS executable path."""
-    # PyInstaller bundle
-    app_path = Path("/Applications/CelesteOS.app/Contents/MacOS/CelesteOS")
-    if app_path.exists():
-        return str(app_path)
+    if _is_production():
+        return str(Path("/Applications/CelesteOS.app/Contents/MacOS/CelesteOS"))
 
     # Development: use the Python interpreter + module
     import sys

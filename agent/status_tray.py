@@ -20,7 +20,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 try:
     import rumps
@@ -43,6 +43,7 @@ class SyncStatus:
         self.files_synced: int = 0
         self.files_pending: int = 0
         self.files_failed: int = 0
+        self.files_dlq: int = 0
         self.current_file: str = ""
         self.errors: list = []  # last 10 errors
         self.nas_root: str = ""
@@ -51,6 +52,7 @@ class SyncStatus:
         self.is_paused: bool = False
         self.total_errors_session: int = 0
         self.recent_activity: list = []  # last 20 file operations
+        self.retry_callback: Optional[Callable] = None
         self._lock = threading.Lock()
 
     def update_cycle(self, stats: dict):
@@ -111,6 +113,7 @@ class SyncStatus:
                 "files_synced": self.files_synced,
                 "files_pending": self.files_pending,
                 "files_failed": self.files_failed,
+                "files_dlq": self.files_dlq,
                 "current_file": self.current_file,
                 "errors": list(self.errors),
                 "nas_root": self.nas_root,
