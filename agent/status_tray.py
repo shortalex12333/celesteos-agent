@@ -38,7 +38,7 @@ class SyncStatus:
     """Thread-safe sync status shared between daemon and tray."""
 
     def __init__(self):
-        self.state: str = "starting"  # starting, idle, syncing, error
+        self.state: str = "starting"  # starting, idle, syncing, error, paused
         self.last_sync: Optional[datetime] = None
         self.files_synced: int = 0
         self.files_pending: int = 0
@@ -48,6 +48,9 @@ class SyncStatus:
         self.nas_root: str = ""
         self.yacht_id: str = ""
         self.yacht_name: str = ""
+        self.is_paused: bool = False
+        self.total_errors_session: int = 0
+        self.recent_activity: list = []  # last 20 file operations
         self._lock = threading.Lock()
 
     def update_cycle(self, stats: dict):
@@ -62,9 +65,15 @@ class SyncStatus:
 
             if stats.get("failed", 0) > 0:
                 self.state = "error"
+                self.total_errors_session += stats["failed"]
+
+            if self.is_paused:
+                self.state = "paused"
 
     def set_syncing(self, filename: str = ""):
         with self._lock:
+            if self.is_paused:
+                return
             self.state = "syncing"
             self.current_file = filename
 
@@ -75,12 +84,23 @@ class SyncStatus:
                 "message": error,
             })
             self.errors = self.errors[-10:]  # keep last 10
+            self.total_errors_session += 1
             self.state = "error"
 
     def clear_errors(self):
         with self._lock:
             self.errors = []
             self.state = "idle"
+
+    def add_activity(self, filename: str, status: str):
+        """Record a file operation. status: 'synced', 'failed', 'pending'."""
+        with self._lock:
+            self.recent_activity.append({
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "filename": filename,
+                "status": status,
+            })
+            self.recent_activity = self.recent_activity[-20:]  # keep last 20
 
     def snapshot(self) -> dict:
         """Thread-safe snapshot of current status."""
@@ -96,6 +116,9 @@ class SyncStatus:
                 "nas_root": self.nas_root,
                 "yacht_id": self.yacht_id,
                 "yacht_name": self.yacht_name,
+                "is_paused": self.is_paused,
+                "total_errors_session": self.total_errors_session,
+                "recent_activity": list(self.recent_activity),
             }
 
 
@@ -158,6 +181,7 @@ STATUS_ICONS = {
     "idle": "●",
     "syncing": "↑",
     "error": "⚠",
+    "paused": "⏸",
 }
 
 
@@ -174,13 +198,13 @@ class CelesteOSTray(rumps.App):
 
     def _build_menu(self):
         self.menu = [
-            rumps.MenuItem("CelesteOS", callback=None),
+            rumps.MenuItem("CelesteOS", callback=self._toggle_status_window),
             None,  # separator
             rumps.MenuItem("Status: Starting...", callback=None),
             rumps.MenuItem("Last sync: Never", callback=None),
             rumps.MenuItem("Files synced: 0", callback=None),
             None,
-            rumps.MenuItem("View Errors", callback=self._view_errors),
+            rumps.MenuItem("Open Status Window", callback=self._toggle_status_window),
             rumps.MenuItem("Open NAS Folder", callback=self._open_nas),
             rumps.MenuItem("Open Logs", callback=self._open_logs),
             None,
@@ -208,6 +232,7 @@ class CelesteOSTray(rumps.App):
                     "idle": "Idle",
                     "syncing": f"Syncing: {snap['current_file']}" if snap['current_file'] else "Syncing...",
                     "error": f"Error ({snap['files_failed']} failed)",
+                    "paused": "Paused",
                 }
                 item.title = f"Status: {state_labels.get(state, state)}"
             elif title.startswith("Last sync:"):
@@ -215,23 +240,13 @@ class CelesteOSTray(rumps.App):
             elif title.startswith("Files synced:"):
                 item.title = f"Files synced: {snap['files_synced']}"
 
-    def _view_errors(self, _):
-        snap = sync_status.snapshot()
-        errors = snap["errors"]
-        if not errors:
-            rumps.alert(
-                title="CelesteOS — No Errors",
-                message="No sync errors to report.",
-            )
-            return
-
-        error_text = "\n".join(
-            f"[{e['time']}] {e['message']}" for e in errors
-        )
-        rumps.alert(
-            title=f"CelesteOS — Recent Errors ({len(errors)})",
-            message=error_text,
-        )
+    def _toggle_status_window(self, _):
+        """Open or focus the branded status window."""
+        try:
+            from .status_window import toggle_status_window
+            toggle_status_window()
+        except Exception as exc:
+            logger.warning("Status window failed: %s", exc)
 
     def _open_nas(self, _):
         snap = sync_status.snapshot()
@@ -249,6 +264,12 @@ class CelesteOSTray(rumps.App):
             rumps.alert("No logs", f"Log directory not found: {log_dir}")
 
     def _quit(self, _):
+        # Close status window if open
+        try:
+            from .status_window import close_status_window
+            close_status_window()
+        except Exception:
+            pass
         rumps.quit_application()
 
 

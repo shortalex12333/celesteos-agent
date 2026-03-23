@@ -252,6 +252,14 @@ def _process_file(cfg: SyncConfig, manifest: ManifestDB, item: ScanItem) -> bool
         manifest.update_mtime(rel, item.mtime_ns)
 
         logger.info("Synced: %s → %s [%s/%s]", rel, storage_path, doc_type, system_tag)
+
+        # Record activity for status window
+        try:
+            from .status_tray import sync_status as _ss
+            _ss.add_activity(rel, "synced")
+        except Exception:
+            pass
+
         return True
 
     except Exception as exc:
@@ -259,6 +267,14 @@ def _process_file(cfg: SyncConfig, manifest: ManifestDB, item: ScanItem) -> bool
         _safe_manifest_write(manifest, "mark_failed", rel)
         _safe_manifest_write(manifest, "log_error", rel, type(exc).__name__, str(exc))
         report_error(cfg, type(exc).__name__, str(exc), file_path=rel)
+
+        # Record failure for status window
+        try:
+            from .status_tray import sync_status as _ss
+            _ss.add_activity(rel, "failed")
+        except Exception:
+            pass
+
         return False
 
 
@@ -612,6 +628,14 @@ def _run_sync_loop(cfg: SyncConfig, once: bool = False) -> None:
 
     try:
         while not _shutdown:
+            # Check pause state
+            if sync_status and sync_status.is_paused:
+                for _ in range(cfg.poll_interval_s):
+                    if _shutdown or not sync_status.is_paused:
+                        break
+                    time.sleep(1)
+                continue
+
             # Update tray status
             if sync_status:
                 sync_status.set_syncing()
