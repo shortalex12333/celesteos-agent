@@ -199,9 +199,9 @@ class CelesteOSTray(rumps.App):
         # Update menu items
         items = list(self.menu.values())
         for item in items:
-            if item is None:
+            if item is None or not hasattr(item, 'title'):
                 continue
-            title = item.title
+            title = getattr(item, 'title', '')
             if title.startswith("Status:"):
                 state_labels = {
                     "starting": "Starting...",
