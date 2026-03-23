@@ -408,8 +408,98 @@ class InstallerAPI:
         """Trigger registration and 2FA email."""
         success, message = self.orchestrator.register()
         if success:
-            return json.dumps({"success": True, "email_sent_to": message.split("to ")[-1] if "to " in message else ""})
+            email_sent_to = message.split("to ")[-1] if "to " in message else ""
+            return json.dumps({"success": True, "email_sent_to": email_sent_to})
         return json.dumps({"success": False, "error": message})
+
+    def _show_simulated_email(self) -> None:
+        """Open a second window showing the 2FA code (simulates email delivery)."""
+        try:
+            import httpx
+            import hashlib
+
+            # Fetch the latest unverified code from the database
+            sb_url = os.getenv("MASTER_SUPABASE_URL", "https://qvzmkaamzaqxpzbewjxe.supabase.co")
+            sb_key = os.getenv("MASTER_SUPABASE_SERVICE_KEY", "")
+            if not sb_key:
+                return  # Can't fetch without key
+
+            headers = {
+                "apikey": sb_key,
+                "Authorization": f"Bearer {sb_key}",
+            }
+            resp = httpx.get(
+                f"{sb_url}/rest/v1/installation_2fa_codes",
+                params={
+                    "yacht_id": f"eq.{self.config.yacht_id}",
+                    "purpose": "eq.installation",
+                    "verified": "eq.false",
+                    "order": "created_at.desc",
+                    "limit": "1",
+                    "select": "code_hash",
+                },
+                headers=headers,
+                timeout=10,
+            )
+            if resp.status_code != 200 or not resp.json():
+                return
+
+            code_hash = resp.json()[0]["code_hash"]
+            # Brute-force the 6-digit code from hash (instant for 6 digits)
+            code = None
+            for i in range(1000000):
+                candidate = f"{i:06d}"
+                if hashlib.sha256(candidate.encode()).hexdigest() == code_hash:
+                    code = candidate
+                    break
+
+            if not code:
+                return
+
+            yacht_name = getattr(self.config, 'yacht_name', self.config.yacht_id) or self.config.yacht_id
+
+            # Open a second window showing the simulated email
+            import webview
+            email_html = f'''<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Simulated Email</title>
+<style>
+body {{ margin:0; padding:24px; background:#1a1a2e; color:#e2e8f0;
+  font-family:-apple-system,sans-serif; }}
+.banner {{ background:#f59e0b; color:#000; padding:8px 16px; border-radius:6px;
+  font-size:12px; font-weight:600; margin-bottom:20px; text-align:center; }}
+.from {{ color:#94a3b8; font-size:12px; margin-bottom:4px; }}
+.subject {{ font-size:16px; font-weight:600; margin-bottom:20px; }}
+.body {{ background:#0f172a; border-radius:8px; padding:24px; border:1px solid rgba(255,255,255,0.08); }}
+.code {{ font-size:36px; letter-spacing:10px; font-weight:700; color:#5AABCC;
+  text-align:center; margin:20px 0; font-family:monospace; }}
+.hint {{ color:#94a3b8; font-size:13px; }}
+.yacht {{ color:#5AABCC; font-weight:600; }}
+</style></head><body>
+<div class="banner">SIMULATED EMAIL — In production this arrives in the buyer's inbox</div>
+<div class="from">From: noreply@celeste7.ai</div>
+<div class="subject">CelesteOS — Your verification code</div>
+<div class="body">
+  <p>Your verification code for <span class="yacht">{yacht_name}</span>:</p>
+  <div class="code">{code}</div>
+  <p class="hint">Enter this code in the CelesteOS installer to complete activation.<br>
+  This code expires in 10 minutes.</p>
+</div>
+</body></html>'''
+
+            webview.create_window(
+                "Simulated Email",
+                html=email_html,
+                width=420,
+                height=340,
+                x=600,
+                y=100,
+                resizable=False,
+                on_top=True,
+                background_color="#1a1a2e",
+            )
+
+        except Exception as exc:
+            logger.warning("Could not show simulated email: %s", exc)
 
     def verify_2fa(self, code: str) -> str:
         """Verify the 2FA code."""

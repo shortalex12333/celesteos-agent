@@ -401,26 +401,69 @@ def _run_installation_flow(cfg: SyncConfig) -> bool:
         # CLI fallback
         from lib.installer import InstallationOrchestrator
         orchestrator = InstallationOrchestrator(install_config)
-        state = orchestrator.initialize()
 
-        if state == InstallState.OPERATIONAL:
-            logger.info("Already activated — skipping installation flow")
-            return True
+        # Check if we already have a pending code (registered externally)
+        code_file = Path.home() / ".celesteos" / "pending_code"
+        has_pending_code = code_file.exists() and code_file.read_text().strip()
 
-        if state == InstallState.UNREGISTERED:
-            logger.info("First launch — registering with cloud...")
-            success, message = orchestrator.register()
-            logger.info("Registration: %s", message)
-            if not success:
-                logger.error("Registration failed: %s", message)
-                return False
+        if has_pending_code:
+            # Skip registration — code was provided externally
+            orchestrator.state = InstallState.PENDING_2FA
+            logger.info("Found pending code file — skipping registration")
+        else:
+            state = orchestrator.initialize()
+
+            if state == InstallState.OPERATIONAL:
+                logger.info("Already activated — skipping installation flow")
+                return True
+
+            if state == InstallState.UNREGISTERED:
+                logger.info("First launch — registering with cloud...")
+                success, message = orchestrator.register()
+                logger.info("Registration: %s", message)
+                if not success:
+                    logger.error("Registration failed: %s", message)
+                    return False
 
         if orchestrator.state == InstallState.PENDING_2FA:
-            logger.info("Enter the 6-digit verification code from your email:")
-            try:
-                code = input("  Code: ").strip()
-            except EOFError:
-                logger.error("No stdin available for code entry")
+            # Try multiple input methods for 2FA code entry
+            code = None
+
+            # Method 1: Environment variable (set by portal or config)
+            code = os.environ.get("CELESTEOS_2FA_CODE", "")
+
+            # Method 2: File-based (portal writes code to ~/.celesteos/pending_code)
+            if not code:
+                code_file = Path.home() / ".celesteos" / "pending_code"
+                if code_file.exists():
+                    code = code_file.read_text().strip()
+                    code_file.unlink()  # one-time use
+
+            # Method 3: Tkinter dialog
+            if not code:
+                try:
+                    import tkinter as tk
+                    from tkinter import simpledialog
+                    root = tk.Tk()
+                    root.withdraw()
+                    code = simpledialog.askstring(
+                        "CelesteOS — Verify",
+                        "Enter the 6-digit code sent to your email:",
+                        parent=root,
+                    )
+                    root.destroy()
+                except Exception as exc:
+                    logger.debug("Tkinter unavailable: %s", exc)
+
+            # Method 4: stdin
+            if not code:
+                try:
+                    code = input("  Enter 6-digit code: ").strip()
+                except EOFError:
+                    pass
+
+            if not code:
+                logger.error("No 2FA code provided. Write code to ~/.celesteos/pending_code and relaunch.")
                 return False
 
             if not code or len(code) != 6:
@@ -450,13 +493,21 @@ def _ensure_nas_root(cfg: SyncConfig) -> SyncConfig:
     if cfg.nas_root and os.path.isdir(cfg.nas_root):
         return cfg
 
-    logger.info("NAS root not configured — launching folder selector")
-    try:
-        from .folder_selector import run_folder_selector
-        nas_root = run_folder_selector()
-    except Exception as exc:
-        logger.error("Folder selector failed: %s", exc)
-        logger.info("Set NAS_ROOT in ~/.celesteos/.env.local or as an environment variable")
+    logger.info("NAS root not configured")
+
+    # Try environment variable first
+    nas_root = os.environ.get("NAS_ROOT", "")
+
+    # Try folder selector (may fail if Tkinter unavailable)
+    if not nas_root:
+        try:
+            from .folder_selector import run_folder_selector
+            nas_root = run_folder_selector()
+        except Exception as exc:
+            logger.warning("Folder selector failed: %s", exc)
+
+    if not nas_root:
+        logger.error("NAS_ROOT not set. Add NAS_ROOT=/path/to/nas to ~/.celesteos/.env.local")
         sys.exit(1)
 
     if not nas_root or not os.path.isdir(nas_root):

@@ -192,7 +192,8 @@ class InstallationOrchestrator:
         self._session = requests.Session()
         self._session.headers.update({
             'Content-Type': 'application/json',
-            'User-Agent': f'CelesteOS-Installer/{config.version}'
+            'User-Agent': f'CelesteOS-Installer/{config.version}',
+            'Accept-Encoding': 'identity',  # Disable gzip (PyInstaller bundling issue)
         })
 
     def initialize(self) -> InstallState:
@@ -298,14 +299,21 @@ class InstallationOrchestrator:
                     self.state = InstallState.ERROR
                     return False, "Server did not return credentials"
 
-                # Store in Keychain immediately
-                if KeychainStore.store_secret(self.config.yacht_id, shared_secret):
-                    self._crypto = CryptoIdentity(self.config.yacht_id, shared_secret)
-                    self.state = InstallState.ACTIVE
-                    return True, "Activation successful. Credentials stored."
-                else:
+                # Store shared_secret in Keychain
+                if not KeychainStore.store_secret(self.config.yacht_id, shared_secret):
                     self.state = InstallState.ERROR
                     return False, "Failed to store credentials in Keychain"
+
+                self._crypto = CryptoIdentity(self.config.yacht_id, shared_secret)
+
+                # Save tenant credentials to ~/.celesteos/.env.local
+                supabase_url = data.get('supabase_url', '')
+                supabase_key = data.get('supabase_service_key', '')
+                if supabase_url and supabase_key:
+                    self._save_tenant_config(supabase_url, supabase_key)
+
+                self.state = InstallState.ACTIVE
+                return True, "Activation successful. Credentials stored."
 
             try:
                 data = resp.json()
@@ -319,6 +327,25 @@ class InstallationOrchestrator:
 
         except requests.RequestException as e:
             return False, f"Network error: {e}"
+
+    def _save_tenant_config(self, supabase_url: str, supabase_key: str) -> None:
+        """Save tenant Supabase credentials to ~/.celesteos/.env.local after activation."""
+        env_dir = Path.home() / ".celesteos"
+        env_dir.mkdir(parents=True, exist_ok=True)
+        env_file = env_dir / ".env.local"
+
+        lines = []
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                key = line.strip().split("=")[0] if "=" in line else ""
+                if key not in ("YACHT_ID", "SUPABASE_URL", "SUPABASE_SERVICE_KEY"):
+                    lines.append(line)
+
+        lines.append(f"YACHT_ID={self.config.yacht_id}")
+        lines.append(f"SUPABASE_URL={supabase_url}")
+        lines.append(f"SUPABASE_SERVICE_KEY={supabase_key}")
+        env_file.write_text("\n".join(lines) + "\n")
+        logger.info("Tenant credentials saved to %s", env_file)
 
     def _verify_credentials(self) -> bool:
         """Verify stored credentials are still valid."""
