@@ -158,7 +158,9 @@ def _do_upload(
     timeout: int,
 ) -> str:
     """
-    Upload a file to a specific storage_path using streaming.
+    Upload a file to a specific storage_path.
+    Uses file handle (not generator) so requests sends Content-Length
+    without chunked transfer encoding — Cloudflare rejects chunked+length.
     Returns the storage_path on success, raises RuntimeError on failure.
     """
     storage_url = f"{cfg.supabase_url}/storage/v1/object/{BUCKET}/{storage_path}"
@@ -166,23 +168,25 @@ def _do_upload(
     headers = _headers(cfg, content_type)
     headers["Content-Length"] = str(file_size)
 
-    # Try POST (create) with streaming body
-    resp = requests.post(
-        storage_url,
-        headers=headers,
-        data=_iter_file_chunks(local_path),
-        timeout=timeout,
-    )
-
-    # If already exists, PUT to overwrite (also streaming)
-    if resp.status_code == 400 and "already exists" in (resp.text or "").lower():
-        logger.debug("File exists, overwriting: %s", storage_path)
-        resp = requests.put(
+    # Use open file handle — requests reads it without chunked encoding
+    with open(local_path, "rb") as f:
+        resp = requests.post(
             storage_url,
             headers=headers,
-            data=_iter_file_chunks(local_path),
+            data=f,
             timeout=timeout,
         )
+
+    # If already exists, PUT to overwrite
+    if resp.status_code == 400 and "already exists" in (resp.text or "").lower():
+        logger.debug("File exists, overwriting: %s", storage_path)
+        with open(local_path, "rb") as f:
+            resp = requests.put(
+                storage_url,
+                headers=headers,
+                data=f,
+                timeout=timeout,
+            )
 
     if resp.status_code not in (200, 201):
         raise RuntimeError(

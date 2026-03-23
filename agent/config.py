@@ -18,7 +18,7 @@ logger = logging.getLogger("agent.config")
 ENV_DIR = Path.home() / ".celesteos"
 ENV_FILE = ENV_DIR / ".env.local"
 MANIFEST_DIR = ENV_DIR
-KEYCHAIN_SERVICE = "ai.celeste7.filesync"
+KEYCHAIN_SERVICE = "com.celeste7.celesteos"
 
 
 @dataclass

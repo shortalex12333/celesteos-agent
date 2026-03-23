@@ -51,8 +51,8 @@ class BuildConfig:
     registration_api_endpoint: str = "https://registration.celeste7.ai"  # Registration API
     version: str = "1.0.0"
     bundle_id: str = "com.celeste7.celesteos"
-    agent_source: Path = Path(os.getenv('CELESTEOS_AGENT_SOURCE', str(Path.home() / "Documents" / "CelesteOS-Cloud")))
-    output_dir: Path = Path(os.getenv('CELESTEOS_OUTPUT_DIR', str(Path.home() / "Documents" / "CelesteOS-Cloud" / "installer" / "build" / "output")))
+    agent_source: Path = Path(os.getenv('CELESTEOS_AGENT_SOURCE', str(Path.home() / "Documents" / "celesteos-agent")))
+    output_dir: Path = Path(os.getenv('CELESTEOS_OUTPUT_DIR', str(Path.home() / "Documents" / "celesteos-agent" / "installer" / "build" / "output")))
     sign_identity: Optional[str] = None  # Apple Developer ID
     supabase_url: str = "https://qvzmkaamzaqxpzbewjxe.supabase.co"
     supabase_service_key: Optional[str] = None  # Set via environment variable
