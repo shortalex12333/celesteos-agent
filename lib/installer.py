@@ -64,6 +64,8 @@ class InstallConfig:
     yacht_name: str = ""
     version: str = "1.0.0"
     build_timestamp: int = 0
+    tenant_supabase_url: str = ""
+    tenant_supabase_service_key: str = ""  # Build-time secret from DMG manifest
 
     @classmethod
     def load_embedded(cls) -> 'InstallConfig':
@@ -107,7 +109,9 @@ class InstallConfig:
             ),
             yacht_name=data.get('yacht_name', ''),
             version=data.get('version', '1.0.0'),
-            build_timestamp=data.get('build_timestamp', 0)
+            build_timestamp=data.get('build_timestamp', 0),
+            tenant_supabase_url=data.get('tenant_supabase_url', ''),
+            tenant_supabase_service_key=data.get('tenant_supabase_service_key', ''),
         )
 
     def verify_integrity(self) -> bool:
@@ -319,10 +323,14 @@ class InstallationOrchestrator:
                 self._crypto = CryptoIdentity(self.config.yacht_id, shared_secret)
 
                 # Save tenant credentials to ~/.celesteos/.env.local
-                supabase_url = data.get('supabase_url', '')
-                supabase_key = data.get('supabase_service_key', '')
+                # URL: prefer API response (fleet_registry), fall back to manifest
+                # Key: ALWAYS from manifest (build-time secret, never sent over wire)
+                supabase_url = data.get('supabase_url', '') or self.config.tenant_supabase_url
+                supabase_key = self.config.tenant_supabase_service_key
                 if supabase_url and supabase_key:
                     self._save_tenant_config(supabase_url, supabase_key)
+                elif not supabase_key:
+                    logger.warning("No tenant service key in manifest — agent will not be able to sync")
 
                 self.state = InstallState.ACTIVE
                 return True, "Activation successful. Credentials stored."

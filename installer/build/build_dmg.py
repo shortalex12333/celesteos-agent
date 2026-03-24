@@ -55,7 +55,9 @@ class BuildConfig:
     output_dir: Path = Path(os.getenv('CELESTEOS_OUTPUT_DIR', str(Path.home() / "Documents" / "celesteos-agent" / "installer" / "build" / "output")))
     sign_identity: Optional[str] = None  # Apple Developer ID
     supabase_url: str = "https://qvzmkaamzaqxpzbewjxe.supabase.co"
-    supabase_service_key: Optional[str] = None  # Set via environment variable
+    supabase_service_key: Optional[str] = None  # Master Supabase — for DB queries during build
+    tenant_supabase_url: str = os.getenv('TENANT_SUPABASE_URL', '')
+    tenant_supabase_service_key: str = os.getenv('TENANT_SUPABASE_SERVICE_KEY', '')  # Embedded in DMG manifest
 
 
 class DMGBuilder:
@@ -106,12 +108,20 @@ class DMGBuilder:
         """Generate installation manifest."""
         print("1. Generating installation manifest...")
 
+        if not self.config.tenant_supabase_service_key:
+            raise BuildError(
+                "TENANT_SUPABASE_SERVICE_KEY environment variable required. "
+                "This is embedded in the DMG — the agent needs it to talk to the tenant database."
+            )
+
         manifest = {
             'yacht_id': self.config.yacht_id,
             'yacht_id_hash': compute_yacht_hash(self.config.yacht_id),
             'yacht_name': self.config.yacht_name,
             'api_endpoint': self.config.api_endpoint,  # Supabase for verify-credentials
             'registration_api_endpoint': self.config.registration_api_endpoint,  # Registration API for 2FA
+            'tenant_supabase_url': self.config.tenant_supabase_url,
+            'tenant_supabase_service_key': self.config.tenant_supabase_service_key,
             'version': self.config.version,
             'build_timestamp': int(datetime.utcnow().timestamp()),
             'bundle_id': self.config.bundle_id,
