@@ -36,7 +36,33 @@ jobs:
           CELESTEOS_OUTPUT_DIR: ${{ github.workspace }}/output
         run: |
           cd installer/build
-          python3 build_dmg.py "${{ inputs.yacht_id }}"
+          python3 build_dmg.py "${{ inputs.yacht_id }}" --no-upload
+
+      - name: Upload DMG to Supabase Storage
+        if: always()
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.MASTER_SUPABASE_SERVICE_KEY }}
+        run: |
+          DMG_FILE=$(ls output/CelesteOS-*.dmg)
+          YACHT_ID="${{ inputs.yacht_id }}"
+          STORAGE_PATH="dmg/${YACHT_ID}/$(basename $DMG_FILE)"
+
+          HTTP_CODE=$(curl -s -o /tmp/upload_response.txt -w "%{http_code}" \
+            -X POST \
+            "${SUPABASE_URL:-https://qvzmkaamzaqxpzbewjxe.supabase.co}/storage/v1/object/installers/${STORAGE_PATH}" \
+            -H "apikey: ${SUPABASE_SERVICE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
+            -H "Content-Type: application/x-apple-diskimage" \
+            -H "x-upsert: true" \
+            --data-binary "@${DMG_FILE}" \
+            --max-time 120)
+
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+            echo "Uploaded to Supabase Storage: ${STORAGE_PATH}"
+          else
+            echo "::warning::Supabase Storage upload failed (HTTP ${HTTP_CODE}). DMG is still available as a GitHub artifact."
+            cat /tmp/upload_response.txt
+          fi
 
       - name: Upload DMG as artifact
         uses: actions/upload-artifact@v4
@@ -59,4 +85,4 @@ jobs:
           echo "| Size | $DMG_SIZE |" >> $GITHUB_STEP_SUMMARY
           echo "| SHA-256 | \`${DMG_SHA:0:16}...\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "DMG has been uploaded to Supabase Storage and is available as a build artifact." >> $GITHUB_STEP_SUMMARY
+          echo "DMG is available as a build artifact. Download from the Artifacts section below." >> $GITHUB_STEP_SUMMARY
