@@ -784,7 +784,15 @@ def main():
     # 3. Install launchd auto-start (first successful run only)
     _install_launchd_if_needed()
 
-    # 4. Run sync loop (headless)
+    # 4. Start menu bar tray icon (background thread)
+    try:
+        from .status_tray import start_tray
+        start_tray()
+        logger.info("Status tray started")
+    except Exception as exc:
+        logger.warning("Status tray unavailable: %s", exc)
+
+    # 5. Run sync loop
     _run_sync_loop(cfg, once=args.once)
 
 
