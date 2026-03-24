@@ -811,7 +811,7 @@ def main():
 
     # 3b. Wire sync_status with yacht metadata + retry callback
     from .status_tray import sync_status
-    sync_status.yacht_name = getattr(cfg, "yacht_name", "") or cfg.yacht_id
+    sync_status.yacht_name = cfg.yacht_name or cfg.yacht_id
     sync_status.yacht_id = cfg.yacht_id
     sync_status.nas_root = cfg.nas_root
 

@@ -32,6 +32,7 @@ class SyncConfig:
     max_satellite_upload_mb: int = 0     # 0 = use default thresholds
     manifest_path: str = ""
     source_type: str = "nas"  # 'nas', 'onedrive', 'local'
+    yacht_name: str = ""
     registration_api_endpoint: str = "https://registration.celeste7.ai"
 
     @property
@@ -147,6 +148,7 @@ def load_from_manifest() -> SyncConfig | None:
                     poll_interval_s=int(data.get("poll_interval_s", 300)),
                     manifest_path=str(MANIFEST_DIR / "filesync_manifest.db"),
                     source_type=data.get("source_type", "nas"),
+                    yacht_name=data.get("yacht_name", ""),
                 )
             except (json.JSONDecodeError, KeyError) as exc:
                 logger.warning("Failed to parse manifest %s: %s", manifest_path, exc)
@@ -185,6 +187,8 @@ def load_from_env() -> SyncConfig:
 
     manifest_path = str(MANIFEST_DIR / "filesync_manifest.db")
 
+    yacht_name = os.environ.get("YACHT_NAME", env.get("YACHT_NAME", ""))
+
     return SyncConfig(
         yacht_id=yacht_id,
         nas_root=nas_root,
@@ -195,7 +199,54 @@ def load_from_env() -> SyncConfig:
         max_satellite_upload_mb=max_sat,
         manifest_path=manifest_path,
         source_type=source_type,
+        yacht_name=yacht_name,
     )
+
+
+def _fetch_yacht_name(cfg: SyncConfig) -> str:
+    """Fetch yacht name from the tenant yacht_registry table.
+
+    Best-effort lookup — returns empty string on any failure.
+    Caches the result in .env.local so we don't query every startup.
+    """
+    if not cfg.yacht_id or not cfg.supabase_key or not cfg.supabase_url:
+        return ""
+
+    # Check .env.local cache first
+    env = _read_env_file(ENV_FILE)
+    cached = env.get("YACHT_NAME", "")
+    if cached:
+        return cached
+
+    try:
+        import requests
+        resp = requests.get(
+            f"{cfg.supabase_url}/rest/v1/yacht_registry",
+            params={"id": f"eq.{cfg.yacht_id}", "select": "name"},
+            headers={
+                "apikey": cfg.supabase_key,
+                "Authorization": f"Bearer {cfg.supabase_key}",
+            },
+            timeout=10,
+        )
+        if resp.ok:
+            rows = resp.json()
+            if rows and rows[0].get("name"):
+                name = rows[0]["name"]
+                # Cache in .env.local
+                lines = []
+                if ENV_FILE.exists():
+                    for line in ENV_FILE.read_text().splitlines():
+                        if not line.strip().startswith("YACHT_NAME="):
+                            lines.append(line)
+                lines.append(f"YACHT_NAME={name}")
+                ENV_FILE.write_text("\n".join(lines) + "\n")
+                logger.info("Fetched yacht name: %s", name)
+                return name
+    except Exception as exc:
+        logger.debug("Could not fetch yacht name: %s", exc)
+
+    return ""
 
 
 def load_config() -> SyncConfig:
@@ -221,5 +272,9 @@ def load_config() -> SyncConfig:
         if not cfg.supabase_key:
             missing.append("SUPABASE_SERVICE_KEY")
         logger.error("Missing required config: %s", ", ".join(missing))
+
+    # Resolve yacht_name if not already set
+    if not cfg.yacht_name and cfg.is_configured:
+        cfg.yacht_name = _fetch_yacht_name(cfg)
 
     return cfg

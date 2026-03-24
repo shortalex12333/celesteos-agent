@@ -6,7 +6,7 @@ Detects new/modified/deleted files and adds them to processing queue.
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from pathlib import Path
-from typing import Callable, Set, Optional
+from typing import Callable, Optional
 import threading
 import time
 
@@ -22,10 +22,7 @@ class DocumentWatcher(FileSystemEventHandler):
         - Calls callback for each file event
     """
 
-    # Supported file extensions
-    SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.xlsx'}
-
-    # Ignore patterns
+    # Ignore patterns — everything else passes through to the daemon's classifier
     IGNORE_PATTERNS = {
         '~$',  # Office temp files
         '.tmp',
@@ -34,7 +31,9 @@ class DocumentWatcher(FileSystemEventHandler):
         '.part',  # Partial downloads
         '.DS_Store',
         'desktop.ini',
-        'thumbs.db'
+        'thumbs.db',
+        '@eaDir',  # Synology metadata
+        '.Spotlight-',
     }
 
     def __init__(
@@ -60,7 +59,7 @@ class DocumentWatcher(FileSystemEventHandler):
         self.debounce_seconds = debounce_seconds
 
         # Track recent events for debouncing (guarded by _lock)
-        self._recent_events: Set[tuple] = set()
+        self._recent_events: dict[tuple, float] = {}
         self._last_cleanup = time.time()
         self._lock = threading.Lock()
 
@@ -105,14 +104,11 @@ class DocumentWatcher(FileSystemEventHandler):
         Returns:
             True if should process
         """
-        # Check extension
-        if file_path.suffix.lower() not in self.SUPPORTED_EXTENSIONS:
-            return False
-
-        # Check ignore patterns
+        # Check ignore patterns against filename and full path
         filename = file_path.name.lower()
+        path_str = str(file_path).lower()
         for pattern in self.IGNORE_PATTERNS:
-            if pattern in filename:
+            if pattern.lower() in filename or pattern.lower() in path_str:
                 return False
 
         # Debounce: check if we recently processed this file
@@ -128,8 +124,8 @@ class DocumentWatcher(FileSystemEventHandler):
             if event_key in self._recent_events:
                 return False
 
-            # Record this event
-            self._recent_events.add((event_key, current_time))
+            # Record this event with timestamp for cleanup
+            self._recent_events[event_key] = current_time
 
         return True
 
@@ -139,9 +135,8 @@ class DocumentWatcher(FileSystemEventHandler):
         cutoff = current_time - (self.debounce_seconds * 2)
 
         self._recent_events = {
-            (key, timestamp)
-            for key, timestamp in self._recent_events
-            if timestamp > cutoff
+            key: ts for key, ts in self._recent_events.items()
+            if ts > cutoff
         }
 
         self._last_cleanup = current_time
