@@ -200,6 +200,51 @@ class RequestVerifier:
         return hmac.compare_digest(expected.lower(), provided_hash.lower())
 
 
+# ── Recovery key encryption (machine-bound) ──────────────────────────
+
+
+def _get_machine_key() -> bytes:
+    """Derive a Fernet key from this Mac's hardware UUID.
+
+    The hardware UUID is unique per Mac, stable across OS reinstalls,
+    and available without elevated permissions. If someone copies the
+    recovery file to a different Mac, decryption will fail — correct
+    behaviour, since they'd need to re-activate via 2FA.
+    """
+    import subprocess
+    import base64
+
+    result = subprocess.run(
+        ["ioreg", "-d2", "-c", "IOPlatformExpertDevice"],
+        capture_output=True, text=True, timeout=5,
+    )
+    for line in result.stdout.splitlines():
+        if "IOPlatformUUID" in line:
+            hw_uuid = line.split('"')[-2]
+            break
+    else:
+        raise RuntimeError("Cannot read hardware UUID")
+
+    dk = hashlib.pbkdf2_hmac(
+        "sha256", hw_uuid.encode(), b"celesteos-recovery-v1", 100_000,
+    )
+    return base64.urlsafe_b64encode(dk)  # 32 bytes → Fernet-compatible key
+
+
+def encrypt_recovery_key(shared_secret: str) -> bytes:
+    """Encrypt shared_secret with machine-bound key. Returns ciphertext bytes."""
+    from cryptography.fernet import Fernet
+
+    return Fernet(_get_machine_key()).encrypt(shared_secret.encode("utf-8"))
+
+
+def decrypt_recovery_key(ciphertext: bytes) -> str:
+    """Decrypt shared_secret with machine-bound key. Returns hex string."""
+    from cryptography.fernet import Fernet
+
+    return Fernet(_get_machine_key()).decrypt(ciphertext).decode("utf-8")
+
+
 # Convenience functions
 def compute_yacht_hash(yacht_id: str) -> str:
     """Compute SHA256 hash of yacht_id."""

@@ -85,7 +85,23 @@ def _get_keychain_password(service: str, account: str) -> str:
         recovery_path = Path.home() / ".celesteos" / ".recovery_key"
         if recovery_path.exists():
             try:
-                secret = recovery_path.read_text().strip()
+                from lib.crypto import decrypt_recovery_key, encrypt_recovery_key
+                raw = recovery_path.read_bytes()
+                try:
+                    secret = decrypt_recovery_key(raw)
+                except Exception:
+                    # Legacy plaintext fallback: 64-char hex string
+                    text = raw.decode("utf-8", errors="replace").strip()
+                    if len(text) == 64 and all(c in "0123456789abcdef" for c in text):
+                        secret = text
+                        # Re-encrypt in place so next read is encrypted
+                        try:
+                            recovery_path.write_bytes(encrypt_recovery_key(secret))
+                            logger.info("Migrated legacy recovery key to encrypted format")
+                        except Exception as enc_exc:
+                            logger.warning("Failed to re-encrypt legacy recovery key: %s", enc_exc)
+                    else:
+                        raise
                 if secret:
                     logger.warning("Using recovery key — Keychain may need repair (%s/%s)", service, account)
                     return secret
