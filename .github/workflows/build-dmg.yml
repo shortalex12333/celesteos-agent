@@ -32,6 +32,7 @@ jobs:
         env:
           SUPABASE_SERVICE_KEY: ${{ secrets.MASTER_SUPABASE_SERVICE_KEY }}
           TENANT_SUPABASE_SERVICE_KEY: ${{ secrets.TENANT_SUPABASE_SERVICE_KEY }}
+          REGISTRATION_API_ENDPOINT: ${{ secrets.REGISTRATION_API_ENDPOINT }}
           CELESTEOS_AGENT_SOURCE: ${{ github.workspace }}
           CELESTEOS_OUTPUT_DIR: ${{ github.workspace }}/output
         run: |
