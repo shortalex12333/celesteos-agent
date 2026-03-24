@@ -784,16 +784,27 @@ def main():
     # 3. Install launchd auto-start (first successful run only)
     _install_launchd_if_needed()
 
-    # 4. Start menu bar tray icon (background thread)
-    try:
-        from .status_tray import start_tray
-        start_tray()
-        logger.info("Status tray started")
-    except Exception as exc:
-        logger.warning("Status tray unavailable: %s", exc)
+    # 4. Start sync loop in background thread
+    import threading
+    sync_thread = threading.Thread(
+        target=_run_sync_loop,
+        args=(cfg,),
+        kwargs={"once": args.once},
+        daemon=True,
+        name="sync-loop",
+    )
+    sync_thread.start()
 
-    # 5. Run sync loop
-    _run_sync_loop(cfg, once=args.once)
+    # 5. Run menu bar tray on main thread (macOS requires NSApplication on main thread)
+    try:
+        from .status_tray import CelesteOSTray
+        import rumps
+        logger.info("Starting menu bar tray icon")
+        app = CelesteOSTray()
+        app.run()  # blocks main thread — sync runs in background
+    except Exception as exc:
+        logger.warning("Status tray unavailable: %s — running headless", exc)
+        sync_thread.join()  # no tray, just wait for sync
 
 
 if __name__ == "__main__":
