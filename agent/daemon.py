@@ -42,7 +42,7 @@ from .heartbeat import report_error, send_heartbeat
 from .indexer import soft_delete, upsert_doc_metadata, upsert_search_index
 from .manifest_db import ManifestDB
 from .scanner import ScanItem, scan_nas
-from .uploader import check_remote_exists, cleanup_orphaned_temps, probe_connectivity, upload_file
+from .uploader import check_remote_exists, cleanup_orphaned_temps, probe_connectivity, sanitize_storage_key, upload_file
 
 # ---------------------------------------------------------------------------
 # PID file lock — prevent double-launch
@@ -170,7 +170,7 @@ def _recover_interrupted(cfg: SyncConfig, manifest: ManifestDB) -> int:
 
     for row in pending:
         rel = row["relative_path"]
-        storage_path = f"{cfg.yacht_id}/{rel}"
+        storage_path = sanitize_storage_key(f"{cfg.yacht_id}/{rel}")
         abs_path = os.path.join(cfg.nas_root, rel)
 
         if not os.path.exists(abs_path):
@@ -222,6 +222,10 @@ def _process_file(cfg: SyncConfig, manifest: ManifestDB, item: ScanItem) -> bool
     rel = item.relative_path
     filename = os.path.basename(rel)
 
+    # Notify status window that we're processing this file
+    from .status_tray import sync_status
+    sync_status.set_syncing(filename)
+
     try:
         # 1. Extension/size gate
         tier = classify_extension(filename)
@@ -262,7 +266,7 @@ def _process_file(cfg: SyncConfig, manifest: ManifestDB, item: ScanItem) -> bool
             return True
 
         # 3. Upload to Supabase Storage (streaming, with verification)
-        storage_path = f"{cfg.yacht_id}/{rel}"
+        storage_path = sanitize_storage_key(f"{cfg.yacht_id}/{rel}")
         upload_file(cfg, item.absolute_path, storage_path)
 
         # 4. Classify
@@ -317,6 +321,7 @@ def _process_file(cfg: SyncConfig, manifest: ManifestDB, item: ScanItem) -> bool
         manifest.update_mtime(rel, item.mtime_ns)
 
         logger.info("Synced: %s → %s [%s/%s]", rel, storage_path, doc_type, system_tag)
+        sync_status.add_activity(filename, "synced")
         return True
 
     except Exception as exc:
@@ -324,6 +329,8 @@ def _process_file(cfg: SyncConfig, manifest: ManifestDB, item: ScanItem) -> bool
         _safe_manifest_write(manifest, "mark_failed", rel)
         _safe_manifest_write(manifest, "log_error", rel, type(exc).__name__, str(exc))
         report_error(cfg, type(exc).__name__, str(exc), file_path=rel)
+        sync_status.add_error(f"{filename}: {exc}")
+        sync_status.add_activity(filename, "failed")
         return False
 
 
@@ -639,6 +646,18 @@ def _run_sync_loop(cfg: SyncConfig, once: bool = False) -> None:
     manifest = ManifestDB(cfg.manifest_path)
     manifest.open()
 
+    # Wire retry callback for the "Retry All Failed" button in status window
+    from .status_tray import sync_status
+    def _retry_failed():
+        count = manifest.reset_failed_to_pending()
+        if count:
+            logger.info("Retry: reset %d failed items to pending", count)
+            sync_status.files_failed = 0
+            sync_status.clear_errors()
+            _watcher_trigger.set()  # wake the sync loop immediately
+        return count
+    sync_status.retry_callback = _retry_failed
+
     if probe_connectivity(cfg):
         _recover_interrupted(cfg, manifest)
         # Cleanup orphaned .tmp files from interrupted large uploads
@@ -715,6 +734,12 @@ def _run_sync_loop(cfg: SyncConfig, once: bool = False) -> None:
             # Update status file
             status_counts = manifest.count_by_status()
             total_synced += stats.get("new", 0) + stats.get("modified", 0)
+
+            # Update in-memory status for the status window
+            from .status_tray import sync_status as _sync_status
+            _sync_status.update_cycle(stats)
+            _sync_status.files_dlq = status_counts.get("dlq", 0)
+
             _write_status({
                 "state": "error" if stats.get("failed", 0) > 0 else "idle",
                 "yacht_id": cfg.yacht_id,
@@ -783,6 +808,12 @@ def main():
 
     # 3. Install launchd auto-start (first successful run only)
     _install_launchd_if_needed()
+
+    # 3b. Wire sync_status with yacht metadata + retry callback
+    from .status_tray import sync_status
+    sync_status.yacht_name = getattr(cfg, "yacht_name", "") or cfg.yacht_id
+    sync_status.yacht_id = cfg.yacht_id
+    sync_status.nas_root = cfg.nas_root
 
     # 4. Start sync loop in background thread
     import threading

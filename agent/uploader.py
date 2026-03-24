@@ -8,6 +8,8 @@ Streams files in chunks to avoid loading entire files into RAM.
 
 import logging
 import os
+import re
+import unicodedata
 from pathlib import Path
 from typing import Iterator
 
@@ -26,6 +28,23 @@ from .retry import retry_with_backoff
 logger = logging.getLogger("agent.uploader")
 
 BUCKET = "yacht-documents"
+
+
+def sanitize_storage_key(path: str) -> str:
+    """Transliterate non-ASCII chars to ASCII for Supabase Storage keys.
+
+    Supabase rejects keys with characters like ö, ü, â, é.
+    NFKD decomposition splits accented chars into base + combining mark,
+    then we drop the marks to get the ASCII base letter.
+    Original filenames are preserved in doc_metadata for display.
+    """
+    normalized = unicodedata.normalize("NFKD", path)
+    ascii_path = normalized.encode("ascii", "ignore").decode("ascii")
+    # Replace any remaining non-portable chars (keep alphanumeric, /, -, _, .)
+    ascii_path = re.sub(r"[^\w/\-.]", "_", ascii_path)
+    ascii_path = re.sub(r"_+", "_", ascii_path)
+    return ascii_path
+
 STREAM_CHUNK_SIZE = 1024 * 1024  # 1 MB chunks for streaming uploads
 RESUMABLE_THRESHOLD = 100 * 1024 * 1024  # 100 MB — use temp path + rename
 
