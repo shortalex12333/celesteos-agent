@@ -48,7 +48,7 @@ class BuildConfig:
     buyer_name: str
     buyer_email: str
     api_endpoint: str = "https://qvzmkaamzaqxpzbewjxe.supabase.co"  # Supabase
-    registration_api_endpoint: str = "https://registration.celeste7.ai"  # Registration API
+    registration_api_endpoint: str = os.getenv('REGISTRATION_API_ENDPOINT', 'http://localhost:8001')  # Production: https://registration.celeste7.ai
     version: str = "1.0.0"
     bundle_id: str = "com.celeste7.celesteos"
     agent_source: Path = Path(os.getenv('CELESTEOS_AGENT_SOURCE', str(Path.home() / "Documents" / "celesteos-agent")))
