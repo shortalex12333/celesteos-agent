@@ -128,14 +128,21 @@ def load_from_manifest() -> SyncConfig | None:
                 data = json.loads(manifest_path.read_text())
                 logger.info("Loaded config from manifest: %s", manifest_path)
 
-                supabase_key = data.get("supabase_service_key", "")
+                # Manifest uses tenant_supabase_* fields; fall back to short names
+                supabase_key = data.get("tenant_supabase_service_key", "") or data.get("supabase_service_key", "")
                 if not supabase_key:
                     supabase_key = _get_keychain_password(KEYCHAIN_SERVICE, "SUPABASE_SERVICE_KEY")
 
+                supabase_url = data.get("tenant_supabase_url", "") or data.get("supabase_url", "")
+
+                # NAS root comes from .env.local after installer, not from manifest
+                env = _read_env_file(ENV_FILE)
+                nas_root = env.get("NAS_ROOT", data.get("nas_root", ""))
+
                 return SyncConfig(
                     yacht_id=data.get("yacht_id", ""),
-                    nas_root=data.get("nas_root", ""),
-                    supabase_url=data.get("supabase_url", "").rstrip("/"),
+                    nas_root=nas_root,
+                    supabase_url=supabase_url.rstrip("/"),
                     supabase_key=supabase_key,
                     poll_interval_s=int(data.get("poll_interval_s", 300)),
                     manifest_path=str(MANIFEST_DIR / "filesync_manifest.db"),
