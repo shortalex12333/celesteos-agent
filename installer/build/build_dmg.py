@@ -454,7 +454,7 @@ def fetch_yacht_from_database(yacht_id: str) -> Dict[str, Any]:
     }
     params = {
         'yacht_id': f'eq.{yacht_id}',
-        'select': 'yacht_id,yacht_name,yacht_model,buyer_name,buyer_email,yacht_id_hash'
+        'select': 'yacht_id,yacht_name,yacht_model,buyer_name,buyer_email,yacht_id_hash,tenant_supabase_url'
     }
 
     response = requests.get(url, headers=headers, params=params, timeout=30)
@@ -508,7 +508,8 @@ def build_for_yacht(
         buyer_name=yacht_data.get('buyer_name', ''),
         buyer_email=yacht_data['buyer_email'],
         sign_identity="Developer ID Application: Your Name" if sign else None,
-        supabase_service_key=os.getenv('SUPABASE_SERVICE_KEY')
+        supabase_service_key=os.getenv('SUPABASE_SERVICE_KEY'),
+        tenant_supabase_url=yacht_data.get('tenant_supabase_url', os.getenv('TENANT_SUPABASE_URL', '')),
     )
 
     builder = DMGBuilder(config)
