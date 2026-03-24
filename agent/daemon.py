@@ -451,32 +451,29 @@ def _run_installation_flow(cfg: SyncConfig) -> bool:
 
         install_config = InstallConfig.load_embedded()
 
-        # Try the full GUI installer in a subprocess.
-        # pywebview's NSApplication event loop can't coexist with the daemon's
-        # main thread, so we run it in a child process that exits cleanly.
+        # Launch the GUI installer.
+        # Inside a PyInstaller bundle, sys.executable is the frozen binary,
+        # not Python, so subprocess mode doesn't work. Import directly instead.
         try:
-            import subprocess as _sp
-            logger.info("Launching installer GUI (subprocess)...")
-            result = _sp.run(
-                [sys.executable, "-m", "agent.installer_ui"],
-                timeout=600,  # 10 min max for user to complete
-            )
-            # Check if installer wrote the config files
+            logger.info("Launching installer GUI...")
+            from .installer_ui import run_installer_ui
+            nas_root = run_installer_ui(install_config)
+            if nas_root and os.path.isdir(nas_root):
+                logger.info("GUI installer completed, NAS root: %s", nas_root)
+                cfg.nas_root = nas_root
+                return True
+            # Check if installer wrote config even if it didn't return a folder
             env_file = Path.home() / ".celesteos" / ".env.local"
             if env_file.exists():
                 from .config import _read_env_file
                 env = _read_env_file(env_file)
                 nas_root = env.get("NAS_ROOT", "")
                 if nas_root and os.path.isdir(nas_root):
-                    logger.info("GUI installer completed, NAS root: %s", nas_root)
+                    logger.info("GUI installer completed (from env), NAS root: %s", nas_root)
                     cfg.nas_root = nas_root
                     return True
             logger.warning("GUI installer finished but config incomplete")
             # Fall through to CLI mode
-        except FileNotFoundError:
-            logger.info("python not found for subprocess, using CLI mode")
-        except _sp.TimeoutExpired:
-            logger.warning("Installer timed out after 10 minutes")
         except Exception as exc:
             logger.warning("GUI installer failed: %s, falling back to CLI", exc)
 
