@@ -1,0 +1,62 @@
+name: Build DMG
+
+on:
+  workflow_dispatch:
+    inputs:
+      yacht_id:
+        description: 'Yacht ID (UUID from new_client.sql output)'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install -r installer/build/requirements.txt
+          pip install cryptography httpx
+
+      - name: Build DMG
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.MASTER_SUPABASE_SERVICE_KEY }}
+          TENANT_SUPABASE_SERVICE_KEY: ${{ secrets.TENANT_SUPABASE_SERVICE_KEY }}
+          CELESTEOS_AGENT_SOURCE: ${{ github.workspace }}
+          CELESTEOS_OUTPUT_DIR: ${{ github.workspace }}/output
+        run: |
+          cd installer/build
+          python3 build_dmg.py "${{ inputs.yacht_id }}"
+
+      - name: Upload DMG as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CelesteOS-${{ inputs.yacht_id }}
+          path: output/CelesteOS-*.dmg
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          DMG_FILE=$(ls output/CelesteOS-*.dmg)
+          DMG_SIZE=$(du -h "$DMG_FILE" | cut -f1)
+          DMG_SHA=$(shasum -a 256 "$DMG_FILE" | cut -d' ' -f1)
+          echo "## Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Yacht ID | \`${{ inputs.yacht_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| DMG | \`$(basename $DMG_FILE)\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Size | $DMG_SIZE |" >> $GITHUB_STEP_SUMMARY
+          echo "| SHA-256 | \`${DMG_SHA:0:16}...\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "DMG has been uploaded to Supabase Storage and is available as a build artifact." >> $GITHUB_STEP_SUMMARY
